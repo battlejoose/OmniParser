@@ -18,17 +18,19 @@ import numpy as np
 # %matplotlib inline
 from matplotlib import pyplot as plt
 import easyocr
-from paddleocr import PaddleOCR
+# Comment out paddleocr import to make it optional
+# from paddleocr import PaddleOCR
 reader = easyocr.Reader(['en'])
-paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
+# Comment out paddleocr initialization
+# paddle_ocr = PaddleOCR(
+#     lang='en',  # other lang also available
+#     use_angle_cls=False,
+#     use_gpu=False,  # using cuda will conflict with pytorch in the same process
+#     show_log=False,
+#     max_batch_size=1024,
+#     use_dilation=True,  # improves accuracy
+#     det_db_score_mode='slow',  # improves accuracy
+#     rec_batch_num=1024)
 import time
 import base64
 
@@ -56,7 +58,7 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         ) 
         else:
             model = Blip2ForConditionalGeneration.from_pretrained(
-            model_name_or_path, device_map=None, torch_dtype=torch.float16
+            model_name_or_path, device_map=None, torch_dtype=torch.float32
         ).to(device)
     elif model_name == "florence2":
         from transformers import AutoProcessor, AutoModelForCausalLM 
@@ -64,7 +66,7 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         if device == 'cpu':
             model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True).to(device)
     return {'model': model.to(device), 'processor': processor}
 
 
@@ -305,7 +307,7 @@ def remove_overlap_new(boxes, iou_threshold, ocr_bbox=None):
                     else:
                         filtered_boxes.append({'type': 'icon', 'bbox': box1_elem['bbox'], 'interactivity': True, 'content': None, 'source':'box_yolo_content_yolo'})
             else:
-                filtered_boxes.append(box1)
+                filtered_boxes.append({'type': 'icon', 'bbox': box1_elem['bbox'], 'interactivity': True, 'content': None, 'source':'box_yolo_content_yolo'})
     return filtered_boxes # torch.tensor(filtered_boxes)
 
 
@@ -429,9 +431,13 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
         ocr_bbox=ocr_bbox.tolist()
     else:
         print('no ocr bbox!!!')
-        ocr_bbox = None
+        ocr_bbox = []  # Change from None to empty list
+        
+    # Ensure ocr_text is also a list even if it's None
+    if ocr_text is None:
+        ocr_text = []
 
-    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
+    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0]
     xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
     
@@ -502,39 +508,83 @@ def get_xywh_yolo(input):
     return x, y, w, h
 
 def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, output_bb_format='xywh', goal_filtering=None, easyocr_args=None, use_paddleocr=False):
+    """
+    Modified to work without paddleocr
+    """
     if isinstance(image_source, str):
-        image_source = Image.open(image_source)
-    if image_source.mode == 'RGBA':
-        # Convert RGBA to RGB to avoid alpha channel issues
-        image_source = image_source.convert('RGB')
-    image_np = np.array(image_source)
-    w, h = image_source.size
-    if use_paddleocr:
-        if easyocr_args is None:
-            text_threshold = 0.5
-        else:
-            text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
-    else:  # EasyOCR
-        if easyocr_args is None:
-            easyocr_args = {}
-        result = reader.readtext(image_np, **easyocr_args)
-        coord = [item[0] for item in result]
-        text = [item[1] for item in result]
-    if display_img:
-        opencv_img = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        bb = []
-        for item in coord:
-            x, y, a, b = get_xywh(item)
-            bb.append((x, y, a, b))
-            cv2.rectangle(opencv_img, (x, y), (x+a, y+b), (0, 255, 0), 2)
-        #  matplotlib expects RGB
-        plt.imshow(cv2.cvtColor(opencv_img, cv2.COLOR_BGR2RGB))
+        image = cv2.imread(image_source)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     else:
-        if output_bb_format == 'xywh':
-            bb = [get_xywh(item) for item in coord]
-        elif output_bb_format == 'xyxy':
-            bb = [get_xyxy(item) for item in coord]
-    return (text, bb), goal_filtering
+        image = np.array(image_source)
+    
+    if easyocr_args is None:
+        easyocr_args = {'paragraph': False, 'text_threshold':0.9}
+    
+    # Use easyocr by default
+    result = reader.readtext(image, **easyocr_args)
+    
+    # Only try to use paddleocr if explicitly requested and available
+    if use_paddleocr:
+        try:
+            # Try to import paddleocr dynamically
+            from paddleocr import PaddleOCR
+            paddle_ocr = PaddleOCR(
+                lang='en',
+                use_angle_cls=False,
+                use_gpu=False,
+                show_log=False,
+                max_batch_size=1024,
+                use_dilation=True,
+                det_db_score_mode='slow',
+                rec_batch_num=1024)
+            
+            # Use paddleocr if import succeeded
+            result = paddle_ocr.ocr(image, cls=False)
+            if len(result) > 0 and result[0] is not None:
+                result = [[res[0], res[1][0]] for res in result[0]]
+            else:
+                result = []
+        except ImportError:
+            # If paddleocr is not available, fall back to easyocr
+            print("PaddleOCR not available, using EasyOCR instead")
+            # We already have the easyocr result, so no need to do anything
+    
+    # Process the results
+    text = []
+    ocr_bbox = []
+    
+    for res in result:
+        if len(res) == 2:
+            bbox, txt = res
+            if isinstance(bbox, list) and len(bbox) == 4:
+                # Convert to xyxy format
+                if output_bb_format == 'xyxy':
+                    x_min = min(bbox[0][0], bbox[1][0], bbox[2][0], bbox[3][0])
+                    y_min = min(bbox[0][1], bbox[1][1], bbox[2][1], bbox[3][1])
+                    x_max = max(bbox[0][0], bbox[1][0], bbox[2][0], bbox[3][0])
+                    y_max = max(bbox[0][1], bbox[1][1], bbox[2][1], bbox[3][1])
+                    ocr_bbox.append([x_min, y_min, x_max, y_max])
+                else:
+                    # Convert to xywh format
+                    x_min = min(bbox[0][0], bbox[1][0], bbox[2][0], bbox[3][0])
+                    y_min = min(bbox[0][1], bbox[1][1], bbox[2][1], bbox[3][1])
+                    x_max = max(bbox[0][0], bbox[1][0], bbox[2][0], bbox[3][0])
+                    y_max = max(bbox[0][1], bbox[1][1], bbox[2][1], bbox[3][1])
+                    width = x_max - x_min
+                    height = y_max - y_min
+                    ocr_bbox.append([x_min, y_min, width, height])
+                
+                text.append(txt)
+    
+    # Apply goal filtering if provided
+    if goal_filtering:
+        filtered_text = []
+        filtered_ocr_bbox = []
+        for i, txt in enumerate(text):
+            if goal_filtering in txt.lower():
+                filtered_text.append(txt)
+                filtered_ocr_bbox.append(ocr_bbox[i])
+        text = filtered_text
+        ocr_bbox = filtered_ocr_bbox
+    
+    return [text, ocr_bbox], False
